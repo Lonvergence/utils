@@ -2,13 +2,6 @@ import numpy as np
 import skimage
 
 
-def check_shape_equal(*mats):
-    mat0 = mats[0]
-    if not all([m.shape == mat0.shape for m in mats[1:]]):
-        raise ValueError('Input images must have the same dimensions.')
-    return
-
-
 def cal_mutual_info(arr1, arr2, bins=256, ranges=((0, 255), (0, 255))):
     arr1_flat = np.ravel(arr1)
     arr2_flat = np.ravel(arr2)
