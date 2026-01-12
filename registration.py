@@ -8,9 +8,14 @@ import numpy as np
 import SimpleITK as sitk
 import skimage
 from loguru import logger
-import json
 from utils import sitk_read, sitk_write
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as nnf
+
+import scipy.io as sio
+import nibabel as nib
 
 @logger.catch()
 def reg_pipeline(fixed, moving, type_of_transform, *to_transforms, 
@@ -302,23 +307,79 @@ class ANTS_Tool:
                                   whichtoinvert=whichtoinvert) 
             for i, to_transform in enumerate(to_transforms)]
 
+class SpatialTransformer(nn.Module):
+    """
+    N-D Spatial Transformer
+    """
 
+    def __init__(self, mode='bilinear'):
+        super().__init__()
 
+        self.mode = mode
 
+    def forward(self, src, flow):
+        # new locations
+        grid = self.get_grid(src.shape[2:])
+        grid = grid.to(src.device)
+        new_locs = grid + flow
+        shape = flow.shape[2:]
 
+        # need to normalize grid values to [-1, 1] for resampler
+        for i in range(len(shape)):
+            new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
 
+        # move channels dim to last position
+        # also not sure why, but the channels need to be reversed
+        if len(shape) == 2:
+            new_locs = new_locs.permute(0, 2, 3, 1)
+            new_locs = new_locs[..., [1, 0]]
+        elif len(shape) == 3:
+            new_locs = new_locs.permute(0, 2, 3, 4, 1)
+            new_locs = new_locs[..., [2, 1, 0]]
 
+        return nnf.grid_sample(src, new_locs, align_corners=True, mode=self.mode)
 
+    def get_grid(self, size):
+        # create sampling grid
+        vectors = [torch.arange(0, s) for s in size]
+        grids = torch.meshgrid(vectors)
+        grid = torch.stack(grids)
+        grid = torch.unsqueeze(grid, 0)
+        grid = grid.type(torch.FloatTensor)
+        return grid
+    
 
+def ANTs_transformation_to_dvf(ants_file : str, shape=None):
+    # return [D, H, W, 3]
+    name = os.path.basename(ants_file).split('.')[-1]
+    if name == 'mat':
+        assert shape is not None, 'shape is None!'
+        
+        mat44 = ants_mat_to_4x4(ants_file)
+        # mat44_inv = np.linalg.inv(mat44)
+        
+        coordinates= np.indices(shape).transpose(1,2,3,0)
+        homogeneous_coordinates = np.concatenate((coordinates, np.ones((*shape, 1))), axis=-1)
+        transformed_coordinates = mat44 @ homogeneous_coordinates.reshape(-1, 4).T
+        transformed_coordinates = transformed_coordinates.T.reshape(*shape, 4)
+        transformed_coordinates = transformed_coordinates[..., :3] - coordinates
+        
+        return transformed_coordinates
+    else:
+        
+        field = nib.load(ants_file)
+        field = field.get_fdata()
+        field = np.squeeze(field)
+        
+        return field
 
-
-
-
-
-
-
-
-
+def ANTs_transformations_compose(ants_files, shape):
+    dvf = torch.zeros((1, 3, *shape), dtype=torch.float32)
+    for ants_file in ants_files:
+        dvf_t = ANTs_transformation_to_dvf(ants_file, shape=shape)
+        dvf_t = torch.from_numpy(dvf_t).permute(3,0,1,2).unsqueeze(0).float()
+        dvf = dvf + SpatialTransformer()(dvf_t, dvf)
+    return dvf.squeeze().permute(1,2,3,0).numpy()
 
 
 
